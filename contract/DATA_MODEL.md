@@ -77,9 +77,11 @@ No custom Soroban storage keys are currently defined or used.
 | `get_round` | `Round` | — | — |
 | `get_choice` | `Submission(n, player)` | — | — |
 | `initialize` | `ADMIN` (instance) | `ADMIN` (instance) | — |
-| `propose_upgrade` | `ADMIN` (instance) | `P_HASH`, `P_AFTER` (instance) | — |
-| `execute_upgrade` | `ADMIN`, `P_AFTER`, `P_HASH` (instance) | removes `P_HASH`, `P_AFTER` (instance) | — |
-| `cancel_upgrade` | `ADMIN`, `P_HASH` (instance) | removes `P_HASH`, `P_AFTER` (instance) | — |
+| `propose_upgrade` ¹ | `ADMIN` (instance) | `P_HASH`, `P_AFTER` (instance) | — |
+| `execute_upgrade` ¹ | `ADMIN`, `P_AFTER`, `P_HASH` (instance) | removes `P_HASH`, `P_AFTER` (instance) | — |
+| `cancel_upgrade` ¹ | `ADMIN`, `P_HASH` (instance) | removes `P_HASH`, `P_AFTER` (instance) | — |
+
+¹ Exempt from the global pause check — see [Emergency Pause Policy](#emergency-pause-policy) below.
 
 ## TTL Policy Baseline
 
@@ -140,6 +142,53 @@ Round lifecycle state machine:
     ▼
 [Round { active: true, round_number + 1 }] ...
 ```
+
+## Emergency Pause Policy
+
+### Overview
+
+The arena contract exposes a global pause mechanism (`pause` / `unpause`, admin-only).
+When paused, all state-mutating game functions reject calls with `ArenaError::Paused`.
+
+**However, governance/upgrade functions are explicitly exempt from the pause check.**
+
+### Exempt functions
+
+| Function | Pause exempt? | Reason |
+| --- | --- | --- |
+| `propose_upgrade` | **Yes** | Admin must be able to queue a recovery upgrade at any time |
+| `execute_upgrade` | **Yes** | Admin must be able to deploy the recovery upgrade after the timelock |
+| `cancel_upgrade` | **Yes** | Admin must be able to retract an incorrect proposal before correcting it |
+| `pause` | **Yes** | Admin must always be able to pause |
+| `unpause` | **Yes** | Admin must always be able to unpause |
+
+### Non-exempt functions (blocked when paused)
+
+| Function | Blocked when paused? |
+| --- | --- |
+| `start_round` | Yes |
+| `submit_choice` | Yes |
+| `timeout_round` | Yes |
+| `join` | Yes |
+| `claim` | Yes |
+
+### Rationale
+
+A global pause is an emergency safety measure (e.g. to halt activity during a
+critical bug discovery). If the pause also blocked upgrade functions, a paused
+contract could become permanently locked with no recovery path. By keeping
+governance functions exempt, the admin retains full ability to:
+
+1. Propose a corrective WASM upgrade while the contract is paused.
+2. Wait for the 48-hour timelock to elapse.
+3. Execute the upgrade and restore normal operation.
+4. Unpause.
+
+### Invariant
+
+> `propose_upgrade`, `execute_upgrade`, and `cancel_upgrade` MUST NOT call
+> `require_not_paused`. Any future addition of new governance functions should
+> follow the same exemption rule and update this table.
 
 ## Historical baseline note
 

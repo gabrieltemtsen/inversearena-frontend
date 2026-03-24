@@ -1,7 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
+    Address, BytesN, Env, Symbol, contract, contracterror, contractimpl, contracttype,
+    symbol_short, token,
 };
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
@@ -10,9 +11,6 @@ const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
 const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 const PENDING_HASH_KEY: Symbol = symbol_short!("P_HASH");
 const EXECUTE_AFTER_KEY: Symbol = symbol_short!("P_AFTER");
-const PRIZE_POOL_KEY: Symbol = symbol_short!("PRIZE");
-const GAME_STATUS_KEY: Symbol = symbol_short!("G_STATUS");
-
 // ── Timelock constant: 48 hours in seconds ────────────────────────────────────
 
 const TIMELOCK_PERIOD: u64 = 48 * 60 * 60;
@@ -77,6 +75,7 @@ pub struct RoundState {
     pub active: bool,
     pub total_submissions: u32,
     pub timed_out: bool,
+    pub finished: bool,
 }
 
 #[contracttype]
@@ -86,7 +85,12 @@ enum DataKey {
     Round,
     Submission(u32, Address),
     Survivor(Address),
-    PrizeClaimed(Address),
+    /// Soroban token contract used for stake + yield payouts (`claim`).
+    Token,
+    /// Per-player payout record set by admin (`set_winner`) before `claim`.
+    Winner(Address),
+    /// Whether this address has already successfully `claim`ed.
+    Claimed(Address),
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -140,11 +144,75 @@ impl ArenaContract {
                 active: false,
                 total_submissions: 0,
                 timed_out: false,
+                finished: false,
             },
         );
         bump(&env, &DataKey::Round);
 
         Ok(())
+    }
+
+    // ── Token and Payouts ────────────────────────────────────────────────────
+
+    pub fn set_token(env: Env, token: Address) {
+        require_not_paused(&env).unwrap();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .expect("not initialized");
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Token, &token);
+    }
+
+    pub fn set_winner(env: Env, player: Address, stake: i128, yield_comp: i128) {
+        require_not_paused(&env).unwrap();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .expect("not initialized");
+        admin.require_auth();
+        storage(&env).set(&DataKey::Winner(player.clone()), &(stake, yield_comp));
+        bump(&env, &DataKey::Winner(player));
+    }
+
+    pub fn claim(env: Env, player: Address) -> Result<(), ArenaError> {
+        require_not_paused(&env)?;
+        env.storage()
+            .instance()
+            .extend_ttl(GAME_TTL_THRESHOLD, GAME_TTL_EXTEND_TO);
+        player.require_auth();
+
+        if storage(&env).has(&DataKey::Claimed(player.clone())) {
+            return Err(ArenaError::AlreadyClaimed);
+        }
+
+        let winner_data: Option<(i128, i128)> = storage(&env).get(&DataKey::Winner(player.clone()));
+        match winner_data {
+            Some((stake, yield_comp)) => {
+                let token: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Token)
+                    .expect("token not set");
+                let token_client = token::Client::new(&env, &token);
+
+                let total_payout = stake + yield_comp;
+                token_client.transfer(&env.current_contract_address(), &player, &total_payout);
+
+                storage(&env).set(&DataKey::Claimed(player.clone()), &true);
+                bump(&env, &DataKey::Claimed(player.clone()));
+
+                let mut round = get_round(&env)?;
+                round.finished = true;
+                storage(&env).set(&DataKey::Round, &round);
+                bump(&env, &DataKey::Round);
+
+                Ok(())
+            }
+            None => Err(ArenaError::NoPrizeToClaim),
+        }
     }
 
     // ── Admin ────────────────────────────────────────────────────────────────
@@ -277,6 +345,7 @@ impl ArenaContract {
             active: true,
             total_submissions: 0,
             timed_out: false,
+            finished: false,
         };
 
         storage(&env).set(&DataKey::Round, &next_round);
@@ -418,41 +487,23 @@ impl ArenaContract {
         storage(&env).get(&DataKey::Submission(round_number, player))
     }
 
-    pub fn claim(env: Env, winner: Address) -> Result<i128, ArenaError> {
-        winner.require_auth();
-
-        if env
-            .storage()
-            .instance()
-            .get::<_, bool>(&GAME_STATUS_KEY)
-            .unwrap_or(false)
-        {
-            return Err(ArenaError::ReentrancyGuard);
-        }
-
-        let prize: i128 = env.storage().instance().get(&PRIZE_POOL_KEY).unwrap_or(0);
-        if prize <= 0 {
-            return Err(ArenaError::NoPrizeToClaim);
-        }
-
-        let prize_key = DataKey::PrizeClaimed(winner.clone());
-        if storage(&env).has(&prize_key) {
-            return Err(ArenaError::AlreadyClaimed);
-        }
-
-        env.storage().instance().set(&GAME_STATUS_KEY, &true);
-
-        storage(&env).set(&prize_key, &prize);
-        bump(&env, &prize_key);
-
-        env.storage().instance().set(&PRIZE_POOL_KEY, &0i128);
-
-        env.storage().instance().set(&GAME_STATUS_KEY, &false);
-
-        Ok(prize)
-    }
-
     // ── Upgrade mechanism ────────────────────────────────────────────────────
+
+    // ── Emergency Pause Policy ───────────────────────────────────────────────
+    //
+    // Governance/upgrade functions (`propose_upgrade`, `execute_upgrade`,
+    // `cancel_upgrade`) are EXEMPT from the global pause check.
+    //
+    // Rationale: A global pause is an emergency safety measure. If it also
+    // blocked upgrade/recovery functions, a paused contract could become
+    // permanently locked with no way out. Admin must always be able to propose,
+    // execute, or cancel an upgrade — even while the contract is paused — so
+    // that recovery or corrective upgrades remain possible.
+    //
+    // All other state-mutating functions (`start_round`, `submit_choice`,
+    // `timeout_round`, `join`, `claim`) continue to require the contract to be
+    // unpaused before proceeding.
+    // ────────────────────────────────────────────────────────────────────────
 
     /// Propose a WASM upgrade. The new hash is stored together with the
     /// earliest timestamp at which `execute_upgrade` may be called (now + 48 h).
@@ -467,10 +518,15 @@ impl ArenaContract {
     /// # Authorization
     /// Requires admin signature (`admin.require_auth()`).
     ///
+    /// # Pause Policy
+    /// **Exempt from pause.** This function may be called by the admin even when
+    /// the contract is paused, allowing upgrade proposals during an emergency.
+    ///
     /// # Events
     /// Emits `UpgradeProposed(new_wasm_hash, execute_after)`.
     pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        require_not_paused(&env).unwrap();
+        // NOTE: pause check intentionally omitted — governance functions are
+        // exempt so that admin can always initiate a recovery upgrade.
         let admin: Address = env
             .storage()
             .instance()
@@ -503,10 +559,14 @@ impl ArenaContract {
     /// # Authorization
     /// Requires admin signature (`admin.require_auth()`).
     ///
+    /// # Pause Policy
+    /// **Exempt from pause.** This function may be called by the admin even when
+    /// the contract is paused, enabling deployment of a recovery upgrade.
+    ///
     /// # Events
     /// Emits `UpgradeExecuted(new_wasm_hash)`.
     pub fn execute_upgrade(env: Env) {
-        require_not_paused(&env).unwrap();
+        // NOTE: pause check intentionally omitted — see Emergency Pause Policy.
         let admin: Address = env
             .storage()
             .instance()
@@ -552,10 +612,15 @@ impl ArenaContract {
     /// # Authorization
     /// Requires admin signature (`admin.require_auth()`).
     ///
+    /// # Pause Policy
+    /// **Exempt from pause.** This function may be called by the admin even when
+    /// the contract is paused, allowing cancellation of an incorrect proposal
+    /// before executing a correct recovery upgrade.
+    ///
     /// # Events
     /// Emits `UpgradeCancelled`.
     pub fn cancel_upgrade(env: Env) {
-        require_not_paused(&env).unwrap();
+        // NOTE: pause check intentionally omitted — see Emergency Pause Policy.
         let admin: Address = env
             .storage()
             .instance()
