@@ -252,7 +252,8 @@ impl ArenaContract {
         let prize = stake
             .checked_add(yield_comp)
             .ok_or(ArenaError::InvalidAmount)?;
-        storage(&env).set(&DataKey::Survivor(player.clone()), &());
+        storage(&env).set(&DataKey::Winner(player.clone()), &());
+        bump(&env, &DataKey::Winner(player.clone()));
         env.storage().instance().set(&PRIZE_POOL_KEY, &prize);
         env.events()
             .publish((TOPIC_WINNER_SET,), (player, stake, yield_comp));
@@ -466,7 +467,7 @@ impl ArenaContract {
 
     pub fn get_user_state(env: Env, player: Address) -> UserStateView {
         let is_active = storage(&env).has(&DataKey::Survivor(player.clone()));
-        let has_won = storage(&env).has(&DataKey::PrizeClaimed(player));
+        let has_won = storage(&env).has(&DataKey::Winner(player));
         UserStateView { is_active, has_won }
     }
 

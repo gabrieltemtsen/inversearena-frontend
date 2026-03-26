@@ -1718,3 +1718,24 @@ fn join_fails_when_paused() {
     assert_eq!(err, Err(Ok(ArenaError::Paused)));
 }
 
+#[test]
+fn winner_is_identifiable_before_claim() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = create_client(&env);
+    client.init(&10);
+    client.initialize(&Address::generate(&env));
+
+    let token_admin_addr = Address::generate(&env);
+    let asset = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
+    let token_addr = asset.address();
+    client.set_token(&token_addr);
+
+    let winner = Address::generate(&env);
+    client.set_winner(&winner, &1000, &100);
+
+    let state = client.get_user_state(&winner);
+    assert_eq!(state.has_won, true);
+    assert_eq!(state.is_active, false);
+}
+
