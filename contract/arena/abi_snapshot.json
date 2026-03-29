@@ -31,7 +31,8 @@
     "GameNotFinished": 27,
     "TokenConfigurationLocked": 28,
     "UpgradeAlreadyPending": 29,
-    "WinnerAlreadySet": 30
+    "WinnerAlreadySet": 30,
+    "WinnerNotSet": 31
   },
   "event_topics": [
     "UP_PROP",

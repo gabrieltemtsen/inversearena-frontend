@@ -80,6 +80,7 @@ pub enum ArenaError {
     TokenConfigurationLocked = 28,
     UpgradeAlreadyPending = 29,
     WinnerAlreadySet = 30,
+    WinnerNotSet = 31,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -726,11 +727,24 @@ impl ArenaContract {
         {
             return Err(ArenaError::GameNotFinished);
         }
-        // Verify caller is the address designated by set_winner(); any other
-        // survivor could otherwise pass require_auth() with their own address
-        // and drain the prize pool.
+        // Primary claim path uses an explicit admin-designated winner. If no
+        // winner has been set, allow a fallback only when exactly one survivor
+        // remains and the caller is that survivor.
         if !storage(&env).has(&DataKey::Winner(winner.clone())) {
-            return Err(ArenaError::NotASurvivor);
+            let survivor_count: u32 = env
+                .storage()
+                .instance()
+                .get(&SURVIVOR_COUNT_KEY)
+                .unwrap_or(0u32);
+            if survivor_count == 1 && storage(&env).has(&DataKey::Survivor(winner.clone())) {
+                storage(&env).set(&DataKey::Winner(winner.clone()), &());
+                bump(&env, &DataKey::Winner(winner.clone()));
+                env.storage().instance().set(&WINNER_SET_KEY, &true);
+            } else if survivor_count == 1 {
+                return Err(ArenaError::NotASurvivor);
+            } else {
+                return Err(ArenaError::WinnerNotSet);
+            }
         }
         if env
             .storage()

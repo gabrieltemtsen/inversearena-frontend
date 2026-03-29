@@ -2300,6 +2300,22 @@ fn claim_succeeds_only_for_designated_winner() {
 #[test]
 fn claim_fails_without_any_winner_set() {
     let (env, _admin, client, _token_id, players) = setup_game(5, 3);
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&GAME_FINISHED_KEY, &true);
+    });
+
+    // set_winner() never called and multiple survivors remain.
+    let result = client.try_claim(&players[0]);
+    assert_eq!(
+        result,
+        Err(Ok(ArenaError::WinnerNotSet)),
+        "claim must fail when no winner has been designated"
+    );
+}
+
+#[test]
+fn last_survivor_can_claim_after_resolve_round() {
+    let (env, _admin, client, _token_id, players) = setup_game(5, 3);
     set_ledger_sequence(&env, 1);
     client.start_round();
     client.submit_choice(&players[0], &1u32, &Choice::Heads);
@@ -2307,13 +2323,24 @@ fn claim_fails_without_any_winner_set() {
     client.submit_choice(&players[2], &1u32, &Choice::Tails);
     set_ledger_sequence(&env, 7);
     client.resolve_round();
-    // set_winner() never called — DataKey::Winner is absent for everyone.
+
+    // No explicit set_winner() call; sole survivor can still claim.
+    let prize = client.claim(&players[0]);
+    assert_eq!(prize, 300i128);
+
+    let user_state = client.get_user_state(&players[0]);
+    assert!(user_state.has_won);
+}
+
+#[test]
+fn claim_fails_gracefully_when_game_finished_but_winner_not_set() {
+    let (env, _admin, client, _token_id, players) = setup_game(5, 3);
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&GAME_FINISHED_KEY, &true);
+    });
+
     let result = client.try_claim(&players[0]);
-    assert_eq!(
-        result,
-        Err(Ok(ArenaError::NotASurvivor)),
-        "claim must fail when no winner has been designated"
-    );
+    assert_eq!(result, Err(Ok(ArenaError::WinnerNotSet)));
 }
 
 // ── Issue #227: minority-wins resolution algorithm unit tests ─────────────────
