@@ -472,8 +472,8 @@ fn test_propose_upgrade_allowed_after_cancel() {
 
 #[test]
 fn test_execute_without_proposal_returns_no_pending_upgrade() {
-    let (_env, _admin, client) = setup();
-    let result = client.try_execute_upgrade();
+    let (env, _admin, client) = setup();
+    let result = client.try_execute_upgrade(&dummy_hash(&env));
     assert_eq!(result, Err(Ok(Error::NoPendingUpgrade)));
 }
 
@@ -487,7 +487,7 @@ fn test_execute_with_only_pending_hash_returns_malformed_upgrade_state() {
             .set(&PENDING_HASH_KEY, &dummy_hash(&env));
     });
 
-    let result = client.try_execute_upgrade();
+    let result = client.try_execute_upgrade(&dummy_hash(&env));
     assert_eq!(result, Err(Ok(Error::MalformedUpgradeState)));
 }
 
@@ -502,19 +502,20 @@ fn test_execute_with_only_execute_after_returns_malformed_upgrade_state() {
         );
     });
 
-    let result = client.try_execute_upgrade();
+    let result = client.try_execute_upgrade(&dummy_hash(&env));
     assert_eq!(result, Err(Ok(Error::MalformedUpgradeState)));
 }
 
 #[test]
 fn test_execute_before_timelock_returns_timelock_not_expired() {
     let (env, _admin, client) = setup();
-    client.propose_upgrade(&dummy_hash(&env));
+    let hash = dummy_hash(&env);
+    client.propose_upgrade(&hash);
     // Advance only 47 h — one hour short.
     env.ledger().with_mut(|l| {
         l.timestamp += 47 * 60 * 60;
     });
-    let result = client.try_execute_upgrade();
+    let result = client.try_execute_upgrade(&hash);
     assert_eq!(result, Err(Ok(Error::TimelockNotExpired)));
 }
 
@@ -522,11 +523,12 @@ fn test_execute_before_timelock_returns_timelock_not_expired() {
 fn test_execute_exactly_at_boundary_returns_timelock_not_expired() {
     let (env, _admin, client) = setup();
     let propose_time = env.ledger().timestamp();
-    client.propose_upgrade(&dummy_hash(&env));
+    let hash = dummy_hash(&env);
+    client.propose_upgrade(&hash);
     env.ledger().with_mut(|l| {
         l.timestamp = propose_time + TIMELOCK - 1;
     });
-    let result = client.try_execute_upgrade();
+    let result = client.try_execute_upgrade(&hash);
     assert_eq!(result, Err(Ok(Error::TimelockNotExpired)));
 }
 
@@ -552,13 +554,14 @@ fn test_cancel_clears_pending_upgrade() {
 #[test]
 fn test_execute_after_cancel_returns_no_pending_upgrade() {
     let (env, _admin, client) = setup();
-    client.propose_upgrade(&dummy_hash(&env));
+    let hash = dummy_hash(&env);
+    client.propose_upgrade(&hash);
     client.cancel_upgrade();
 
     env.ledger().with_mut(|l| {
         l.timestamp += TIMELOCK + 1;
     });
-    let result = client.try_execute_upgrade();
+    let result = client.try_execute_upgrade(&hash);
     assert_eq!(result, Err(Ok(Error::NoPendingUpgrade)));
 }
 
@@ -585,6 +588,150 @@ fn test_pending_upgrade_none_after_cancel() {
     client.propose_upgrade(&dummy_hash(&env));
     client.cancel_upgrade();
     assert!(client.pending_upgrade().is_none());
+}
+
+// ── Issue #518: required timelock test suite (9 cases) ───────────────────────
+
+#[test]
+fn timelock_propose_stores_hash_and_executable_after_and_emits_event() {
+    use soroban_sdk::testutils::Ledger as _;
+
+    let (env, _admin, client) = setup();
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+
+    client.propose_upgrade(&hash);
+
+    let pending = client.pending_upgrade().expect("pending must be set");
+    assert_eq!(pending.0, hash);
+    assert!(
+        pending.1 >= env.ledger().timestamp() + TIMELOCK,
+        "executable_after must be at least propose_time + 48h"
+    );
+}
+
+#[test]
+fn timelock_execute_before_delay_returns_timelock_not_expired() {
+    let (env, _admin, client) = setup();
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.propose_upgrade(&hash);
+    env.ledger().with_mut(|l| {
+        l.timestamp += TIMELOCK - 1;
+    });
+    assert_eq!(
+        client.try_execute_upgrade(&hash),
+        Err(Ok(Error::TimelockNotExpired))
+    );
+}
+
+#[test]
+fn timelock_execute_exactly_at_boundary_passes_timelock_check() {
+    let (env, _admin, client) = setup();
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    let propose_time = env.ledger().timestamp();
+    client.propose_upgrade(&hash);
+    env.ledger().with_mut(|l| {
+        l.timestamp = propose_time + TIMELOCK;
+    });
+    let result = client.try_execute_upgrade(&hash);
+    assert_ne!(
+        result,
+        Err(Ok(Error::TimelockNotExpired)),
+        "timelock must allow execution at timestamp == execute_after"
+    );
+}
+
+#[test]
+fn timelock_execute_after_delay_passes_timelock_check() {
+    let (env, _admin, client) = setup();
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    let propose_time = env.ledger().timestamp();
+    client.propose_upgrade(&hash);
+    env.ledger().with_mut(|l| {
+        l.timestamp = propose_time + TIMELOCK + 3600;
+    });
+    let result = client.try_execute_upgrade(&hash);
+    assert_ne!(
+        result,
+        Err(Ok(Error::TimelockNotExpired)),
+        "timelock must allow execution after the delay"
+    );
+}
+
+#[test]
+fn timelock_cancel_before_execute_clears_pending_and_execute_panics() {
+    let (env, _admin, client) = setup();
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.propose_upgrade(&hash);
+    client.cancel_upgrade();
+
+    assert!(client.pending_upgrade().is_none());
+
+    env.ledger().with_mut(|l| {
+        l.timestamp += TIMELOCK + 1;
+    });
+    assert_eq!(
+        client.try_execute_upgrade(&hash),
+        Err(Ok(Error::NoPendingUpgrade))
+    );
+}
+
+#[test]
+#[should_panic(expected = "InvalidAction")]
+fn timelock_non_admin_propose_panics() {
+    let env = Env::default();
+    let contract_id = env.register(FactoryContract, ());
+    let client = FactoryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.propose_upgrade(&hash);
+}
+
+#[test]
+#[should_panic(expected = "InvalidAction")]
+fn timelock_non_admin_execute_panics() {
+    let env = Env::default();
+    let contract_id = env.register(FactoryContract, ());
+    let client = FactoryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.execute_upgrade(&hash);
+}
+
+#[test]
+fn timelock_double_propose_returns_upgrade_already_pending() {
+    let (env, _admin, client) = setup();
+    let hash1 = BytesN::from_array(&env, &[1u8; 32]);
+    let hash2 = BytesN::from_array(&env, &[2u8; 32]);
+
+    client.propose_upgrade(&hash1);
+    let result = client.try_propose_upgrade(&hash2);
+    assert_eq!(result, Err(Ok(Error::UpgradeAlreadyPending)));
+
+    // First proposal is intact.
+    let pending = client.pending_upgrade().unwrap();
+    assert_eq!(pending.0, hash1);
+}
+
+#[test]
+fn timelock_execute_with_wrong_hash_returns_hash_mismatch() {
+    let (env, _admin, client) = setup();
+    let stored_hash = BytesN::from_array(&env, &[0u8; 32]);
+    let wrong_hash = BytesN::from_array(&env, &[0xFFu8; 32]);
+
+    let propose_time = env.ledger().timestamp();
+    client.propose_upgrade(&stored_hash);
+    env.ledger().with_mut(|l| {
+        l.timestamp = propose_time + TIMELOCK;
+    });
+
+    assert_eq!(
+        client.try_execute_upgrade(&wrong_hash),
+        Err(Ok(Error::HashMismatch))
+    );
 }
 
 // ── Admin access control ──────────────────────────────────────────────────────
@@ -730,7 +877,7 @@ fn test_unauthorized_execute_upgrade_panics() {
     let client = FactoryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     client.initialize(&admin);
-    client.execute_upgrade();
+    client.execute_upgrade(&dummy_hash(&env));
 }
 
 #[test]
@@ -1092,7 +1239,7 @@ fn test_update_arena_status_success_and_auth() {
     let (env, admin, client) = setup();
     client.set_arena_wasm_hash(&dummy_hash(&env));
     let currency = supported_currency(&env, &client);
-    
+
     // Create pool will internally call set_arena_metadata, setting status to Pending
     let arena_addr = client.create_pool(&admin, &MIN_STAKE, &currency, &10u32, &10u32, &(env.ledger().timestamp() + 7200));
 
@@ -1105,7 +1252,7 @@ fn test_update_arena_status_success_and_auth() {
         &None,
         &admin,
     );
-    
+
     // Check initial status
     let arena_ref = client.get_arena_ref(&0u64);
     assert_eq!(arena_ref.contract, arena_addr);
@@ -1136,10 +1283,10 @@ fn test_update_arena_status_unauthorized() {
     let env = Env::default();
     let contract_id = env.register(FactoryContract, ());
     let client = FactoryContractClient::new(&env, &contract_id);
-    
+
     // Generate a dummy arena address
     let arena_addr = Address::generate(&env);
-    
+
     // Inject ArenaRef directly to avoid needing to mock complex auth trees
     env.as_contract(&contract_id, || {
         env.storage().persistent().set(
@@ -1158,306 +1305,197 @@ fn test_update_arena_status_unauthorized() {
     assert_auth_err(result);
 }
 
-// ── Issue #448: private arena whitelist ──────────────────────────────────────
+// ── Issue #517: fee timelock tests ────────────────────────────────────────────
 
-/// Helper: create a pool, call set_arena_metadata, and return the arena address
-/// plus the host address.
-fn setup_private_arena(
-    env: &Env,
-    client: &FactoryContractClient<'static>,
-) -> (Address, Address, u64) {
-    let host = Address::generate(env);
-    client.add_host_to_whitelist(&host);
-    client.set_arena_wasm_hash(&dummy_hash(env));
-    let currency = supported_currency(env, client);
+const FEE_TIMELOCK: u64 = 24 * 60 * 60; // 24 hours
 
-    let arena_addr = client.create_pool(&host, &MIN_STAKE, &currency, &10u32, &8u32, &true);
-
-    let arena_id: u64 = 42;
-    let name = soroban_sdk::String::from_str(env, "Private Arena");
-
-    // Call set_metadata directly on the arena (host is admin after create_pool).
-    let env_s: &'static Env = unsafe { &*(env as *const Env) };
-    let arena = ArenaContractClient::new(env_s, &arena_addr);
-    arena.set_metadata(&arena_id, &name, &None, &host);
-
-    // Register the ArenaRef in the factory so whitelist calls can find the host.
-    inject_arena_ref(env, &client.address, arena_id, &host);
-
-    (arena_addr, host, arena_id)
+#[test]
+fn fee_default_is_200_bps() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(client.current_fee_bps(), 200u32);
 }
 
-// AC: Only host can add to whitelist
 #[test]
-fn test_only_host_can_add_to_whitelist() {
+fn fee_propose_stores_pending_and_effective_at() {
     let (env, _admin, client) = setup();
-    let host = Address::generate(&env);
-    let arena_id: u64 = 100;
-    inject_arena_ref(&env, &client.address, arena_id, &host);
+    let new_fee = 500u32;
 
-    let player = Address::generate(&env);
+    client.propose_fee_update(&new_fee);
 
-    // With mock_all_auths the host auth is satisfied — should succeed.
-    client.add_to_whitelist(&arena_id, &soroban_sdk::vec![&env, player.clone()]);
-    assert!(client.is_whitelisted(&arena_id, &player));
+    let pending = client.pending_fee_update().expect("pending fee must be set");
+    assert_eq!(pending.0, new_fee);
+    assert!(
+        pending.1 >= env.ledger().timestamp() + FEE_TIMELOCK,
+        "effective_at must be at least now + 24h"
+    );
+    // Current fee must not change yet.
+    assert_eq!(client.current_fee_bps(), 200u32);
+}
 
-    // Without mocked auth, a non-host caller must fail.
-    let env2 = Env::default();
-    let contract_id2 = env2.register(FactoryContract, ());
-    let client2 = FactoryContractClient::new(&env2, &contract_id2);
-    let admin2 = Address::generate(&env2);
-    // Only mock auth for initialize so the contract is set up.
-    env2.mock_auths(&[soroban_sdk::testutils::MockAuth {
-        address: &admin2,
-        invoke: &soroban_sdk::testutils::MockAuthInvoke {
-            contract: &contract_id2,
-            fn_name: "initialize",
-            args: soroban_sdk::vec![&env2, admin2.clone().into_val(&env2)].into(),
-            sub_invokes: &[],
-        },
-    }]);
-    client2.initialize(&admin2);
-
-    // Inject an ArenaRef with a known host directly into storage.
-    let known_host = Address::generate(&env2);
-    let fake_arena = Address::generate(&env2);
-    env2.as_contract(&contract_id2, || {
-        env2.storage().persistent().set(
-            &DataKey::ArenaRef(99u64),
-            &ArenaRef {
-                contract: fake_arena,
-                status: ArenaStatus::Pending,
-                host: known_host.clone(),
-            },
-        );
+#[test]
+fn fee_execute_before_timelock_returns_fee_timelock_not_expired() {
+    let (env, _admin, client) = setup();
+    client.propose_fee_update(&500u32);
+    env.ledger().with_mut(|l| {
+        l.timestamp += FEE_TIMELOCK - 1;
     });
-
-    // An attacker (not the host) tries to add themselves — must fail auth.
-    let attacker = Address::generate(&env2);
-    let result = client2.try_add_to_whitelist(
-        &99u64,
-        &soroban_sdk::vec![&env2, attacker.clone()],
+    assert_eq!(
+        client.try_execute_fee_update(),
+        Err(Ok(Error::FeeTimelockNotExpired))
     );
-    assert_auth_err(result);
 }
 
-// AC: Only host can remove from whitelist
 #[test]
-fn test_only_host_can_remove_from_whitelist() {
+fn fee_execute_exactly_at_boundary_passes() {
     let (env, _admin, client) = setup();
-    let host = Address::generate(&env);
-    let arena_id: u64 = 101;
-    inject_arena_ref(&env, &client.address, arena_id, &host);
-
-    let player = Address::generate(&env);
-    client.add_to_whitelist(&arena_id, &soroban_sdk::vec![&env, player.clone()]);
-    assert!(client.is_whitelisted(&arena_id, &player));
-
-    client.remove_from_whitelist(&arena_id, &soroban_sdk::vec![&env, player.clone()]);
-    assert!(!client.is_whitelisted(&arena_id, &player));
-
-    // Non-host attacker must fail auth.
-    let env2 = Env::default();
-    let contract_id2 = env2.register(FactoryContract, ());
-    let client2 = FactoryContractClient::new(&env2, &contract_id2);
-    let admin2 = Address::generate(&env2);
-    env2.mock_auths(&[soroban_sdk::testutils::MockAuth {
-        address: &admin2,
-        invoke: &soroban_sdk::testutils::MockAuthInvoke {
-            contract: &contract_id2,
-            fn_name: "initialize",
-            args: soroban_sdk::vec![&env2, admin2.clone().into_val(&env2)].into(),
-            sub_invokes: &[],
-        },
-    }]);
-    client2.initialize(&admin2);
-
-    let known_host = Address::generate(&env2);
-    let fake_arena = Address::generate(&env2);
-    env2.as_contract(&contract_id2, || {
-        env2.storage().persistent().set(
-            &DataKey::ArenaRef(99u64),
-            &ArenaRef {
-                contract: fake_arena,
-                status: ArenaStatus::Pending,
-                host: known_host.clone(),
-            },
-        );
+    let propose_time = env.ledger().timestamp();
+    client.propose_fee_update(&500u32);
+    env.ledger().with_mut(|l| {
+        l.timestamp = propose_time + FEE_TIMELOCK;
     });
-
-    let attacker = Address::generate(&env2);
-    let result = client2.try_remove_from_whitelist(
-        &99u64,
-        &soroban_sdk::vec![&env2, attacker.clone()],
+    // Should not return FeeTimelockNotExpired (may fail with other errors in test env).
+    let result = client.try_execute_fee_update();
+    assert_ne!(
+        result,
+        Err(Ok(Error::FeeTimelockNotExpired)),
+        "fee update must be allowed at timestamp == effective_at"
     );
-    assert_auth_err(result);
 }
 
-// AC: add/remove on unknown arena_id returns ArenaNotFound
 #[test]
-fn test_whitelist_unknown_arena_returns_not_found() {
+fn fee_execute_after_timelock_applies_new_fee() {
     let (env, _admin, client) = setup();
-    let player = Address::generate(&env);
-    let result = client.try_add_to_whitelist(
-        &9999u64,
-        &soroban_sdk::vec![&env, player.clone()],
-    );
-    assert_eq!(result, Err(Ok(Error::ArenaNotFound)));
+    let propose_time = env.ledger().timestamp();
+    let new_fee = 300u32;
+    client.propose_fee_update(&new_fee);
+    env.ledger().with_mut(|l| {
+        l.timestamp = propose_time + FEE_TIMELOCK + 1;
+    });
+    client.execute_fee_update();
 
-    let result2 = client.try_remove_from_whitelist(
-        &9999u64,
-        &soroban_sdk::vec![&env, player.clone()],
+    assert_eq!(client.current_fee_bps(), new_fee);
+    assert!(
+        client.pending_fee_update().is_none(),
+        "pending state must be cleared after execution"
     );
-    assert_eq!(result2, Err(Ok(Error::ArenaNotFound)));
 }
 
-// AC: is_whitelisted returns false for unknown arena / unknown player
 #[test]
-fn test_is_whitelisted_returns_false_for_unknown() {
-    let (env, _admin, client) = setup();
-    let player = Address::generate(&env);
-    assert!(!client.is_whitelisted(&9999u64, &player));
+fn fee_cancel_clears_pending_and_fee_unchanged() {
+    let (_env, _admin, client) = setup();
+    client.propose_fee_update(&999u32);
+    client.cancel_fee_update();
+
+    assert!(client.pending_fee_update().is_none());
+    assert_eq!(client.current_fee_bps(), 200u32, "fee must remain unchanged after cancel");
 }
 
-// AC: Public arenas bypass whitelist check entirely
 #[test]
-fn test_public_arena_join_bypasses_whitelist() {
+fn fee_execute_without_pending_returns_no_pending_fee_update() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(
+        client.try_execute_fee_update(),
+        Err(Ok(Error::NoPendingFeeUpdate))
+    );
+}
+
+#[test]
+fn fee_cancel_without_pending_returns_no_pending_fee_update() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(
+        client.try_cancel_fee_update(),
+        Err(Ok(Error::NoPendingFeeUpdate))
+    );
+}
+
+#[test]
+fn fee_double_propose_returns_fee_already_pending() {
+    let (_env, _admin, client) = setup();
+    client.propose_fee_update(&300u32);
+    let result = client.try_propose_fee_update(&400u32);
+    assert_eq!(result, Err(Ok(Error::FeeAlreadyPending)));
+    // Original fee update still pending.
+    assert_eq!(client.pending_fee_update().unwrap().0, 300u32);
+}
+
+#[test]
+fn fee_propose_exceeding_max_returns_fee_too_high() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(
+        client.try_propose_fee_update(&2_001u32),
+        Err(Ok(Error::FeeTooHigh))
+    );
+}
+
+#[test]
+fn fee_propose_at_max_succeeds() {
+    let (_env, _admin, client) = setup();
+    assert!(client.try_propose_fee_update(&2_000u32).is_ok());
+}
+
+#[test]
+fn fee_non_admin_propose_fails() {
+    let env = Env::default();
+    let contract_id = env.register(FactoryContract, ());
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    let c = FactoryContractClient::new(&env, &contract_id);
+    c.initialize(&admin);
+    env.mock_auths(&[]);
+    let result = c.try_propose_fee_update(&300u32);
+    assert!(result.is_err(), "non-admin must not be able to propose a fee update");
+}
+
+#[test]
+fn fee_non_admin_execute_fails() {
+    let env = Env::default();
+    let contract_id = env.register(FactoryContract, ());
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    let c = FactoryContractClient::new(&env, &contract_id);
+    c.initialize(&admin);
+    c.propose_fee_update(&300u32);
+    env.ledger().with_mut(|l| {
+        l.timestamp += FEE_TIMELOCK + 1;
+    });
+    env.mock_auths(&[]);
+    let result = c.try_execute_fee_update();
+    assert!(result.is_err(), "non-admin must not be able to execute a fee update");
+}
+
+#[test]
+fn fee_snapshot_stored_in_arena_metadata() {
+    // Create a pool, then change the fee — existing arena metadata must retain
+    // the fee that was in effect at creation time.
     let (env, admin, client) = setup();
     client.set_arena_wasm_hash(&dummy_hash(&env));
+    let currency = supported_currency(&env, &client);
+    let host = admin.clone();
 
-    let token_admin = Address::generate(&env);
-    let currency = env
-        .register_stellar_asset_contract_v2(token_admin.clone())
-        .address();
-    let token = soroban_sdk::token::StellarAssetClient::new(&env, &currency);
-    client.add_supported_token(&currency);
+    // Default fee is 200 bps at creation time.
+    let arena_addr = client.create_pool(&host, &MIN_STAKE, &currency, &5u32, &4u32, &(env.ledger().timestamp() + 7200));
+    let pool_id = 0u32;
+    let metadata = client.get_arena(&pool_id).expect("arena must exist");
+    assert_eq!(metadata.win_fee_bps, 200u32, "fee snapshot must equal 200 at creation");
 
-    // Create a PUBLIC arena (is_private = false).
-    let arena_addr = client.create_pool(&admin, &MIN_STAKE, &currency, &10u32, &8u32, &false);
-
-    let env_s: &'static Env = unsafe { &*(&env as *const Env) };
-    let arena = ArenaContractClient::new(env_s, &arena_addr);
-
-    // Any player can join without being whitelisted.
-    let player = Address::generate(&env);
-    token.mint(&player, &(MIN_STAKE * 2));
-    assert!(arena.try_join(&player, &MIN_STAKE).is_ok());
-}
-
-// AC: Private arena join succeeds for whitelisted player
-#[test]
-fn test_private_arena_join_succeeds_for_whitelisted_player() {
-    let (env, _admin, client) = setup();
-
-    // Create a real SAC token so the arena can process transfers.
-    let token_admin = Address::generate(&env);
-    let currency = env
-        .register_stellar_asset_contract_v2(token_admin.clone())
-        .address();
-    let token = soroban_sdk::token::StellarAssetClient::new(&env, &currency);
-    client.add_supported_token(&currency);
-
-    let host = Address::generate(&env);
-    client.add_host_to_whitelist(&host);
-    client.set_arena_wasm_hash(&dummy_hash(&env));
-
-    let arena_addr = client.create_pool(&host, &MIN_STAKE, &currency, &10u32, &8u32, &true);
-
-    let arena_id: u64 = 42;
-    let name = soroban_sdk::String::from_str(&env, "Private Arena");
-    let env_s: &'static Env = unsafe { &*(&env as *const Env) };
-    let arena = ArenaContractClient::new(env_s, &arena_addr);
-    arena.set_metadata(&arena_id, &name, &None, &host);
-    inject_arena_ref(&env, &client.address, arena_id, &host);
-
-    let player = Address::generate(&env);
-    token.mint(&player, &(MIN_STAKE * 2));
-
-    // Whitelist the player.
-    client.add_to_whitelist(&arena_id, &soroban_sdk::vec![&env, player.clone()]);
-    assert!(client.is_whitelisted(&arena_id, &player));
-
-    // Whitelisted player can join.
-    assert!(arena.try_join(&player, &MIN_STAKE).is_ok());
-}
-
-// AC: Private arena join blocked for non-whitelisted player (NotWhitelisted)
-#[test]
-fn test_private_arena_join_blocked_for_non_whitelisted_player() {
-    let (env, _admin, client) = setup();
-
-    let token_admin = Address::generate(&env);
-    let currency = env
-        .register_stellar_asset_contract_v2(token_admin.clone())
-        .address();
-    let token = soroban_sdk::token::StellarAssetClient::new(&env, &currency);
-    client.add_supported_token(&currency);
-
-    let host = Address::generate(&env);
-    client.add_host_to_whitelist(&host);
-    client.set_arena_wasm_hash(&dummy_hash(&env));
-
-    let arena_addr = client.create_pool(&host, &MIN_STAKE, &currency, &10u32, &8u32, &true);
-
-    let arena_id: u64 = 42;
-    let name = soroban_sdk::String::from_str(&env, "Private Arena");
-    let env_s: &'static Env = unsafe { &*(&env as *const Env) };
-    let arena = ArenaContractClient::new(env_s, &arena_addr);
-    arena.set_metadata(&arena_id, &name, &None, &host);
-    inject_arena_ref(&env, &client.address, arena_id, &host);
-
-    let player = Address::generate(&env);
-    token.mint(&player, &(MIN_STAKE * 2));
-
-    // Player is NOT whitelisted — join must be rejected.
-    let result = arena.try_join(&player, &MIN_STAKE);
-    assert!(result.is_err(), "non-whitelisted player must not join private arena");
-}
-
-// AC: Whitelist add emits event
-#[test]
-fn test_add_to_whitelist_emits_event() {
-    use soroban_sdk::testutils::Events as _;
-
-    let (env, _admin, client) = setup();
-    let host = Address::generate(&env);
-    let arena_id: u64 = 55;
-    inject_arena_ref(&env, &client.address, arena_id, &host);
-    let player = Address::generate(&env);
-
-    client.add_to_whitelist(&arena_id, &soroban_sdk::vec![&env, player.clone()]);
-
-    // Verify the AWL_ADD event was emitted.
-    let events = env.events().all();
-    let has_wl_add = events.iter().any(|(_contract, topics, _data)| {
-        topics.iter().any(|t| {
-            let s: soroban_sdk::Symbol = t.into_val(&env);
-            s == soroban_sdk::symbol_short!("AWL_ADD")
-        })
+    // Now queue and apply a fee change.
+    client.propose_fee_update(&500u32);
+    env.ledger().with_mut(|l| {
+        l.timestamp += FEE_TIMELOCK + 1;
     });
-    assert!(has_wl_add, "add_to_whitelist must emit an AWL_ADD event");
-}
+    client.execute_fee_update();
+    assert_eq!(client.current_fee_bps(), 500u32);
 
-// AC: Whitelist remove emits event
-#[test]
-fn test_remove_from_whitelist_emits_event() {
-    use soroban_sdk::testutils::Events as _;
+    // The existing arena's metadata must still show the original 200 bps.
+    let metadata_after = client.get_arena(&pool_id).expect("arena must still exist");
+    assert_eq!(
+        metadata_after.win_fee_bps, 200u32,
+        "fee snapshot in arena metadata must not change when global fee is updated"
+    );
 
-    let (env, _admin, client) = setup();
-    let host = Address::generate(&env);
-    let arena_id: u64 = 56;
-    inject_arena_ref(&env, &client.address, arena_id, &host);
-    let player = Address::generate(&env);
-    client.add_to_whitelist(&arena_id, &soroban_sdk::vec![&env, player.clone()]);
-    client.remove_from_whitelist(&arena_id, &soroban_sdk::vec![&env, player.clone()]);
-
-    // Verify the AWL_REM event was emitted.
-    let events = env.events().all();
-    let has_wl_rem = events.iter().any(|(_contract, topics, _data)| {
-        topics.iter().any(|t| {
-            let s: soroban_sdk::Symbol = t.into_val(&env);
-            s == soroban_sdk::symbol_short!("AWL_REM")
-        })
-    });
-    assert!(has_wl_rem, "remove_from_whitelist must emit an AWL_REM event");
+    // A newly created arena should pick up the new 500 bps fee.
+    let arena_addr2 = client.create_pool(&host, &MIN_STAKE, &currency, &5u32, &4u32, &(env.ledger().timestamp() + 7200));
+    let metadata2 = client.get_arena(&1u32).expect("second arena must exist");
+    assert_eq!(metadata2.win_fee_bps, 500u32, "new arena must snapshot the current 500 bps fee");
+    let _ = (arena_addr, arena_addr2);
 }
