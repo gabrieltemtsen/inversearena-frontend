@@ -47,6 +47,7 @@ impl MockFactoryContract {
             win_fee_bps: fee,
         })
     }
+    pub fn record_win_fee(_env: Env, _amount: i128) {}
 }
 
 const TIMELOCK: u64 = 48 * 60 * 60;
@@ -864,4 +865,186 @@ fn win_fee_overflow_guard_returns_error() {
         &symbol_short!("XLM"),
     );
     assert_eq!(result, Err(Ok(PayoutError::ArithmeticOverflow)));
+}
+
+// ── Issue #581: Fee rounding and dust behavior ────────────────────────────────
+
+#[test]
+fn fee_rounding_with_tiny_payout_and_high_bps() {
+    let (env, _admin, client, token_id, _treasury, _factory_id, factory_client) =
+        setup_with_token();
+    let currency = symbol_short!("USDC");
+    client.set_currency_token(&currency, &token_id);
+    let token = TokenClient::new(&env, &token_id);
+
+    let winner = Address::generate(&env);
+    let caller = Address::generate(&env);
+    factory_client.set_arena(&(100u32 as u64), &caller);
+    factory_client.set_fee_bps(&9_999);
+
+    let amount = 1i128;
+    let before_winner = token.balance(&winner);
+    let before_factory = token.balance(&factory_client.address);
+
+    client.distribute_winnings(
+        &caller,
+        &symbol_short!("CTX"),
+        &100u32,
+        &1u32,
+        &winner,
+        &amount,
+        &currency,
+    );
+
+    let fee = amount * 9_999i128 / 10_000i128;
+    let winner_amount = amount - fee;
+    assert_eq!(token.balance(&winner), before_winner + winner_amount);
+    assert_eq!(token.balance(&factory_client.address), before_factory + fee);
+    assert_eq!(winner_amount, 1i128);
+    assert_eq!(fee, 0i128);
+}
+
+#[test]
+fn fee_rounding_with_small_payout_exact_division() {
+    let (env, _admin, client, token_id, _treasury, _factory_id, factory_client) =
+        setup_with_token();
+    let currency = symbol_short!("USDC");
+    client.set_currency_token(&currency, &token_id);
+    let token = TokenClient::new(&env, &token_id);
+
+    let winner = Address::generate(&env);
+    let caller = Address::generate(&env);
+    factory_client.set_arena(&(101u32 as u64), &caller);
+    factory_client.set_fee_bps(&5_000);
+
+    let amount = 10_000i128;
+    let before_winner = token.balance(&winner);
+    let before_factory = token.balance(&factory_client.address);
+
+    client.distribute_winnings(
+        &caller,
+        &symbol_short!("CTX"),
+        &101u32,
+        &1u32,
+        &winner,
+        &amount,
+        &currency,
+    );
+
+    let fee = amount * 5_000i128 / 10_000i128;
+    let winner_amount = amount - fee;
+    assert_eq!(token.balance(&winner), before_winner + winner_amount);
+    assert_eq!(token.balance(&factory_client.address), before_factory + fee);
+    assert_eq!(winner_amount, 5_000i128);
+    assert_eq!(fee, 5_000i128);
+}
+
+#[test]
+fn fee_rounding_with_remainder() {
+    let (env, _admin, client, token_id, _treasury, _factory_id, factory_client) =
+        setup_with_token();
+    let currency = symbol_short!("USDC");
+    client.set_currency_token(&currency, &token_id);
+    let token = TokenClient::new(&env, &token_id);
+
+    let winner = Address::generate(&env);
+    let caller = Address::generate(&env);
+    factory_client.set_arena(&(102u32 as u64), &caller);
+    factory_client.set_fee_bps(&333);
+
+    let amount = 1_000i128;
+    let before_winner = token.balance(&winner);
+    let before_factory = token.balance(&factory_client.address);
+
+    client.distribute_winnings(
+        &caller,
+        &symbol_short!("CTX"),
+        &102u32,
+        &1u32,
+        &winner,
+        &amount,
+        &currency,
+    );
+
+    let fee = amount * 333i128 / 10_000i128;
+    let winner_amount = amount - fee;
+    assert_eq!(token.balance(&winner), before_winner + winner_amount);
+    assert_eq!(token.balance(&factory_client.address), before_factory + fee);
+    assert_eq!(winner_amount, 967i128);
+    assert_eq!(fee, 33i128);
+}
+
+// ── Issue #582: Missing currency-token mapping path ──────────────────────────
+
+#[test]
+fn distribute_winnings_records_payout_without_token_mapping() {
+    let (env, _admin, client, _, factory_client) = setup();
+
+    let winner = Address::generate(&env);
+    let ctx = symbol_short!("NO_TOKEN");
+    let pool_id = 200u32;
+    let round_id = 1u32;
+    let amount = 5_000i128;
+    let currency = symbol_short!("UNKNOWN");
+
+    assert!(!client.is_payout_processed(&ctx, &pool_id, &round_id, &winner));
+
+    let caller = Address::generate(&env);
+    factory_client.set_arena(&(pool_id as u64), &caller);
+    client.distribute_winnings(
+        &caller, &ctx, &pool_id, &round_id, &winner, &amount, &currency,
+    );
+
+    assert!(client.is_payout_processed(&ctx, &pool_id, &round_id, &winner));
+    let payout = client
+        .get_payout(&ctx, &pool_id, &round_id, &winner)
+        .expect("payout must be recorded");
+    assert_eq!(payout.winner, winner);
+    assert_eq!(payout.amount, amount);
+    assert_eq!(payout.currency, currency);
+    assert!(payout.paid);
+}
+
+#[test]
+fn distribute_winnings_with_partial_token_mapping() {
+    let (env, _admin, client, token_id, _treasury, _, factory_client) = setup_with_token();
+
+    let currency1 = symbol_short!("USDC");
+    let currency2 = symbol_short!("EURC");
+    client.set_currency_token(&currency1, &token_id);
+
+    let winner = Address::generate(&env);
+    let caller = Address::generate(&env);
+    factory_client.set_arena(&(201u32 as u64), &caller);
+
+    client.distribute_winnings(
+        &caller,
+        &symbol_short!("CTX"),
+        &201u32,
+        &1u32,
+        &winner,
+        &1_000i128,
+        &currency1,
+    );
+
+    assert!(
+        client.is_payout_processed(&symbol_short!("CTX"), &201u32, &1u32, &winner),
+        "payout should be recorded for currency1"
+    );
+
+    let winner2 = Address::generate(&env);
+    client.distribute_winnings(
+        &caller,
+        &symbol_short!("CTX"),
+        &201u32,
+        &2u32,
+        &winner2,
+        &2_000i128,
+        &currency2,
+    );
+
+    assert!(
+        client.is_payout_processed(&symbol_short!("CTX"), &201u32, &2u32, &winner2),
+        "payout should be recorded for currency2 even without token mapping"
+    );
 }

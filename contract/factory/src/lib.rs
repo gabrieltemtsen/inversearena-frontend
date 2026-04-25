@@ -169,6 +169,22 @@ const REGISTRY_TTL_EXTEND_TO: u32 = 535_680;
 
 const DEFAULT_MIN_STAKE: i128 = 10_000_000;
 
+// ── Round speed bounds (mirrored from arena for fail-fast validation) ────────
+
+/// Minimum `round_speed_in_ledgers` — 10 ledgers ≈ 50 s at mainnet ~5 s/ledger.
+#[cfg(not(test))]
+const MIN_ROUND_SPEED_LEDGERS: u32 = 10;
+/// Minimum `round_speed_in_ledgers` — relaxed for tests.
+#[cfg(test)]
+const MIN_ROUND_SPEED_LEDGERS: u32 = 1;
+
+/// Maximum `round_speed_in_ledgers` — 17 280 ledgers ≈ 1 day at mainnet ~5 s/ledger.
+#[cfg(not(test))]
+const MAX_ROUND_SPEED_LEDGERS: u32 = 17_280;
+/// Maximum `round_speed_in_ledgers` — relaxed for tests.
+#[cfg(test)]
+const MAX_ROUND_SPEED_LEDGERS: u32 = 100_000;
+
 // ── Event topics ──────────────────────────────────────────────────────────────
 
 const TOPIC_UPGRADE_PROPOSED: Symbol = symbol_short!("UP_PROP");
@@ -277,6 +293,8 @@ pub enum Error {
     HostStakeInsufficient = 32,
     /// Arithmetic overflow in fee calculation/accumulation.
     ArithmeticOverflow = 33,
+    /// `round_speed` is below `MIN_ROUND_SPEED_LEDGERS` or above `MAX_ROUND_SPEED_LEDGERS`.
+    InvalidRoundSpeed = 34,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -791,6 +809,7 @@ impl FactoryContract {
     /// The caller must provide a valid stake amount >= minimum stake and a
     /// capacity in range [2, MAX_POOL_CAPACITY]. `pool_id` must be unique.
     /// The `currency` must have been previously approved via `add_supported_token`.
+    /// The `round_speed` must be in range [MIN_ROUND_SPEED_LEDGERS, MAX_ROUND_SPEED_LEDGERS].
     /// Emits `PoolCreated(pool_id, creator, capacity, stake_amount)`.
     ///
     /// # Errors
@@ -801,6 +820,7 @@ impl FactoryContract {
     /// * [`Error::ExceedsPlayerCap`] — `capacity` exceeds `max_players_cap()`.
     /// * [`Error::InvalidStakeAmount`] — `stake_amount` is zero or negative.
     /// * [`Error::StakeBelowMinimum`] — `stake_amount` is below the configured minimum.
+    /// * [`Error::InvalidRoundSpeed`] — `round_speed` is outside the allowed range.
     /// * [`Error::WasmHashNotSet`] — `set_arena_wasm_hash` has not been called yet.
     pub fn create_pool(
         env: Env,
@@ -849,6 +869,10 @@ impl FactoryContract {
             return Err(Error::StakeBelowMinimum);
         }
 
+        if round_speed < MIN_ROUND_SPEED_LEDGERS || round_speed > MAX_ROUND_SPEED_LEDGERS {
+            return Err(Error::InvalidRoundSpeed);
+        }
+
         // Issue #449: host must have enough stake locked in staking contract.
         let staking_contract = Self::get_staking_contract(env.clone())?;
         let host_stake: i128 = env.invoke_contract(
@@ -859,6 +883,9 @@ impl FactoryContract {
         if host_stake < Self::get_min_host_stake(env.clone()) {
             return Err(Error::HostStakeInsufficient);
         }
+
+        // Cache staking contract for the lock_host_stake call below to avoid repeated reads.
+        let cached_staking_contract = staking_contract;
 
         // ── Arena creation fee (fee-then-deploy) ─────────────────────────────
         let (creation_fee, fee_token) = Self::get_creation_fee(env.clone());
@@ -1013,10 +1040,9 @@ impl FactoryContract {
             ),
         );
 
-        // Lock host stake against this arena id in staking contract.
-        let staking_contract = Self::get_staking_contract(env.clone())?;
+        // Lock host stake against this arena id in staking contract (using cached contract address).
         env.invoke_contract::<()>(
-            &staking_contract,
+            &cached_staking_contract,
             &soroban_sdk::Symbol::new(&env, "lock_host_stake"),
             soroban_sdk::vec![
                 &env,
