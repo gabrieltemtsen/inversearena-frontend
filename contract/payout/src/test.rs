@@ -22,13 +22,22 @@ impl MockFactoryContract {
         env.storage().instance().get(&arena_id).unwrap()
     }
     pub fn current_fee_bps(_env: Env) -> u32 {
-        _env.storage().instance().get(&symbol_short!("FEE_BPS")).unwrap_or(0)
+        _env.storage()
+            .instance()
+            .get(&symbol_short!("FEE_BPS"))
+            .unwrap_or(0)
     }
     pub fn set_fee_bps(env: Env, bps: u32) {
-        env.storage().instance().set(&symbol_short!("FEE_BPS"), &bps);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("FEE_BPS"), &bps);
     }
     pub fn get_arena(env: Env, arena_id: u32) -> Option<FactoryArenaMetadata> {
-        let fee: u32 = env.storage().instance().get(&symbol_short!("FEE_BPS")).unwrap_or(0);
+        let fee: u32 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("FEE_BPS"))
+            .unwrap_or(0);
         let r: Option<ArenaRef> = env.storage().instance().get(&(arena_id as u64));
         r.map(|a| FactoryArenaMetadata {
             pool_id: arena_id,
@@ -531,7 +540,8 @@ fn read_functions_unaffected_by_payout_pause() {
 
 #[test]
 fn pause_allows_currency_token_rotation_for_incident_response() {
-    let (_env, _admin, client, token_id, _treasury, _factory_id, _factory_client) = setup_with_token();
+    let (_env, _admin, client, token_id, _treasury, _factory_id, _factory_client) =
+        setup_with_token();
     let currency = symbol_short!("USDC");
 
     client.pause();
@@ -804,7 +814,8 @@ fn test_unauthorized_caller_attack_scenario() {
 
 #[test]
 fn win_fee_bps_cases_0_200_1000() {
-    let (env, _admin, client, token_id, _treasury, _factory_id, factory_client) = setup_with_token();
+    let (env, _admin, client, token_id, _treasury, _factory_id, factory_client) =
+        setup_with_token();
     let currency = symbol_short!("USDC");
     client.set_currency_token(&currency, &token_id);
     let token = TokenClient::new(&env, &token_id);
@@ -837,7 +848,8 @@ fn win_fee_bps_cases_0_200_1000() {
 
 #[test]
 fn win_fee_overflow_guard_returns_error() {
-    let (env, _admin, client, _token_id, _treasury, _factory_id, factory_client) = setup_with_token();
+    let (env, _admin, client, _token_id, _treasury, _factory_id, factory_client) =
+        setup_with_token();
     let winner = Address::generate(&env);
     let caller = Address::generate(&env);
     factory_client.set_arena(&(99u32 as u64), &caller);

@@ -54,10 +54,16 @@ fn assert_pool_invariants(client: &StakingContractClient<'_>, tracked: &[Address
     assert!(total_shares >= 0, "total_shares must never be negative");
 
     if total_staked == 0 {
-        assert_eq!(total_shares, 0, "total_shares must be zero when total_staked is zero");
+        assert_eq!(
+            total_shares, 0,
+            "total_shares must be zero when total_staked is zero"
+        );
     }
     if total_shares == 0 {
-        assert_eq!(total_staked, 0, "total_staked must be zero when total_shares is zero");
+        assert_eq!(
+            total_staked, 0,
+            "total_staked must be zero when total_shares is zero"
+        );
     }
 
     let mut sum_amounts = 0i128;
@@ -68,8 +74,14 @@ fn assert_pool_invariants(client: &StakingContractClient<'_>, tracked: &[Address
         sum_shares += pos.shares;
     }
 
-    assert_eq!(sum_amounts, total_staked, "position amounts must match total_staked");
-    assert_eq!(sum_shares, total_shares, "position shares must match total_shares");
+    assert_eq!(
+        sum_amounts, total_staked,
+        "position amounts must match total_staked"
+    );
+    assert_eq!(
+        sum_shares, total_shares,
+        "position shares must match total_shares"
+    );
 }
 
 #[test]

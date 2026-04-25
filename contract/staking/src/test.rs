@@ -70,8 +70,14 @@ fn assert_pool_invariants(client: &StakingContractClient<'_>, tracked: &[Address
         sum_shares += pos.shares;
     }
 
-    assert_eq!(sum_amounts, total_staked, "position amounts must match total_staked");
-    assert_eq!(sum_shares, total_shares, "position shares must match total_shares");
+    assert_eq!(
+        sum_amounts, total_staked,
+        "position amounts must match total_staked"
+    );
+    assert_eq!(
+        sum_shares, total_shares,
+        "position shares must match total_shares"
+    );
 }
 
 // ── Issue #499: constructor-based init guard tests ───────────────────────────
@@ -723,7 +729,10 @@ fn update_config_requires_positive_min_stake() {
         max_stake_per_address: 1_000_000_000,
         rewards_enabled: true,
     };
-    assert_eq!(client.try_update_config(&cfg), Err(Ok(StakingError::InvalidAmount)));
+    assert_eq!(
+        client.try_update_config(&cfg),
+        Err(Ok(StakingError::InvalidAmount))
+    );
 }
 
 #[test]
@@ -737,7 +746,10 @@ fn stake_rejects_below_min_and_above_max() {
         rewards_enabled: true,
     };
     client.update_config(&cfg);
-    assert_eq!(client.try_stake(&staker, &99), Err(Ok(StakingError::BelowMinStake)));
+    assert_eq!(
+        client.try_stake(&staker, &99),
+        Err(Ok(StakingError::BelowMinStake))
+    );
     client.stake(&staker, &100);
     assert_eq!(
         client.try_stake(&staker, &60),

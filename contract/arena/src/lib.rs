@@ -1,13 +1,13 @@
 #![no_std]
 
-use soroban_sdk::{IntoVal,
-    Address, Bytes, BytesN, Env, String, Symbol, Vec, contract, contracterror, contractimpl,
-    contracttype, panic_with_error, symbol_short, token,
+use soroban_sdk::{
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec, contract, contracterror,
+    contractimpl, contracttype, panic_with_error, symbol_short, token,
 };
-#[path = "../../shared/upgrade.rs"]
-mod upgrade_utils;
 #[path = "../../shared/admin_transfer.rs"]
 mod admin_transfer_utils;
+#[path = "../../shared/upgrade.rs"]
+mod upgrade_utils;
 use admin_transfer_utils::{
     AdminTransferErrors, AdminTransferKeys, accept_admin_transfer as accept_admin_transfer_flow,
     cancel_admin_transfer as cancel_admin_transfer_flow,
@@ -15,9 +15,9 @@ use admin_transfer_utils::{
     propose_admin_transfer as propose_admin_transfer_flow,
 };
 use upgrade_utils::{
-    ExecuteTimePolicy, UpgradeErrors, UpgradeKeys, UpgradeTopics, cancel_upgrade as cancel_upgrade_flow,
-    execute_upgrade as execute_upgrade_flow, pending_upgrade as pending_upgrade_flow,
-    propose_upgrade as propose_upgrade_flow,
+    ExecuteTimePolicy, UpgradeErrors, UpgradeKeys, UpgradeTopics,
+    cancel_upgrade as cancel_upgrade_flow, execute_upgrade as execute_upgrade_flow,
+    pending_upgrade as pending_upgrade_flow, propose_upgrade as propose_upgrade_flow,
 };
 
 mod bounds;
@@ -641,8 +641,6 @@ impl ArenaContract {
         env.storage().instance().set(&WINNER_SHARE_KEY, &bps);
         Ok(())
     }
-
-
 
     pub fn set_reserve_ratio_bps(env: Env, bps: u32) -> Result<(), ArenaError> {
         let admin = Self::admin(env.clone());
@@ -1478,7 +1476,9 @@ impl ArenaContract {
 
         let total_rounds_survived = match status {
             PlayerStatus::Winner => round.round_number,
-            PlayerStatus::Elim => eliminated_round.unwrap_or(round.round_number).saturating_sub(1),
+            PlayerStatus::Elim => eliminated_round
+                .unwrap_or(round.round_number)
+                .saturating_sub(1),
             PlayerStatus::Active => {
                 if round.round_number == 0 {
                     0
@@ -2480,7 +2480,8 @@ mod expire_arena_tests;
 #[cfg(test)]
 mod mutation_tests;
 #[cfg(test)]
+mod snapshot_test;
+#[cfg(test)]
 mod state_machine_tests;
 #[cfg(test)]
 mod test;
-#[cfg(test)] mod snapshot_test;

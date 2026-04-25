@@ -3640,23 +3640,26 @@ fn test_prize_pool_manipulation_protection() {
     let (env, _admin, client, token_id, _players) = setup_game(5, 3);
     let asset = StellarAssetClient::new(&env, &token_id);
     let arena_id = client.address.clone();
-    
+
     // Initial prize pool from 3 players joining (100 * 3 = 300)
     let initial_state = client.get_arena_state();
     assert_eq!(initial_state.current_stake, 300);
-    
+
     // Attacker sends tokens directly to the contract address without joining
     let attacker = Address::generate(&env);
     asset.mint(&attacker, &1000);
-    
+
     // Use token client for transfer
     let token_client = token::Client::new(&env, &token_id);
     token_client.transfer(&attacker, &arena_id, &500);
-    
+
     // Check prize pool again - it should STILL be 300
     let after_attack_state = client.get_arena_state();
-    assert_eq!(after_attack_state.current_stake, 300, "Prize pool was inflated by direct transfer!");
-    
+    assert_eq!(
+        after_attack_state.current_stake, 300,
+        "Prize pool was inflated by direct transfer!"
+    );
+
     // Verify that the actual token balance IS higher, but the contract doesn't use it
     assert_eq!(token_client.balance(&arena_id), 800); // 300 (joins) + 500 (attack)
 }
@@ -3671,26 +3674,25 @@ fn test_yield_split_invariants() {
     client.init(&5, &10i128, &3600);
 
     // Initial sum is 7_000 (winner) + 1_000 (reserve) = 8_000
-    
+
     // Test setting winner share too high
-    let result = client.try_set_winner_yield_share_bps(&9_500); 
+    let result = client.try_set_winner_yield_share_bps(&9_500);
     // 9_500 + 1_000 = 10_500 > 10_000, should fail
     assert_eq!(result, Err(Ok(ArenaError::InvalidAmount)));
-    
+
     // Test setting reserve too high
     let result = client.try_set_reserve_ratio_bps(&3_500);
     // 3_500 + 7_000 = 10_500 > 10_000, should fail
     assert_eq!(result, Err(Ok(ArenaError::InvalidAmount)));
-    
+
     // Setting both validly
     assert!(client.try_set_winner_yield_share_bps(&6_000).is_ok());
     // Current sum: 6_000 + 1_000 = 7_000
-    
+
     assert!(client.try_set_reserve_ratio_bps(&4_000).is_ok());
     // Current sum: 6_000 + 4_000 = 10_000 (ok)
-    
+
     // Now try to exceed again
     let result = client.try_set_winner_yield_share_bps(&6_001);
     assert_eq!(result, Err(Ok(ArenaError::InvalidAmount)));
 }
-

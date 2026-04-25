@@ -1,13 +1,13 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, BytesN, Env, IntoVal, Symbol, Vec,
+    Address, BytesN, Env, IntoVal, Symbol, Vec, contract, contracterror, contractimpl,
+    contracttype, panic_with_error, symbol_short, token,
 };
-#[path = "../../shared/upgrade.rs"]
-mod upgrade_utils;
 #[path = "../../shared/admin_transfer.rs"]
 mod admin_transfer_utils;
+#[path = "../../shared/upgrade.rs"]
+mod upgrade_utils;
 use admin_transfer_utils::{
     AdminTransferErrors, AdminTransferKeys, accept_admin_transfer as accept_admin_transfer_flow,
     cancel_admin_transfer as cancel_admin_transfer_flow,
@@ -15,9 +15,9 @@ use admin_transfer_utils::{
     propose_admin_transfer as propose_admin_transfer_flow,
 };
 use upgrade_utils::{
-    ExecuteTimePolicy, UpgradeErrors, UpgradeKeys, UpgradeTopics, cancel_upgrade as cancel_upgrade_flow,
-    execute_upgrade as execute_upgrade_flow, pending_upgrade as pending_upgrade_flow,
-    propose_upgrade as propose_upgrade_flow,
+    ExecuteTimePolicy, UpgradeErrors, UpgradeKeys, UpgradeTopics,
+    cancel_upgrade as cancel_upgrade_flow, execute_upgrade as execute_upgrade_flow,
+    pending_upgrade as pending_upgrade_flow, propose_upgrade as propose_upgrade_flow,
 };
 
 const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
@@ -742,7 +742,8 @@ impl PayoutContract {
             },
             PayoutError::NoPendingAdminTransfer,
         )?;
-        env.events().publish((TOPIC_ADMIN_CANCELLED,), (EVENT_VERSION,));
+        env.events()
+            .publish((TOPIC_ADMIN_CANCELLED,), (EVENT_VERSION,));
         Ok(())
     }
 
@@ -796,5 +797,6 @@ fn record_receipt(
 }
 
 #[cfg(test)]
+mod snapshot_test;
+#[cfg(test)]
 mod test;
-#[cfg(test)] mod snapshot_test;

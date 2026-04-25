@@ -72,10 +72,7 @@ pub fn cancel_admin_transfer<E: Copy>(
     Ok(())
 }
 
-pub fn pending_admin_transfer(
-    env: &Env,
-    keys: AdminTransferKeys<'_>,
-) -> Option<(Address, u64)> {
+pub fn pending_admin_transfer(env: &Env, keys: AdminTransferKeys<'_>) -> Option<(Address, u64)> {
     let addr: Option<Address> = env.storage().instance().get(keys.pending_admin);
     let exp: Option<u64> = env.storage().instance().get(keys.admin_expiry);
     match (addr, exp) {

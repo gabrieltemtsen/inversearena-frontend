@@ -4,10 +4,10 @@ use soroban_sdk::{
     Address, BytesN, Env, Symbol, contract, contracterror, contractimpl, contracttype,
     panic_with_error, symbol_short, token,
 };
-#[path = "../../shared/upgrade.rs"]
-mod upgrade_utils;
 #[path = "../../shared/admin_transfer.rs"]
 mod admin_transfer_utils;
+#[path = "../../shared/upgrade.rs"]
+mod upgrade_utils;
 use admin_transfer_utils::{
     AdminTransferErrors, AdminTransferKeys, accept_admin_transfer as accept_admin_transfer_flow,
     cancel_admin_transfer as cancel_admin_transfer_flow,
@@ -15,9 +15,9 @@ use admin_transfer_utils::{
     propose_admin_transfer as propose_admin_transfer_flow,
 };
 use upgrade_utils::{
-    ExecuteTimePolicy, UpgradeErrors, UpgradeKeys, UpgradeTopics, cancel_upgrade as cancel_upgrade_flow,
-    execute_upgrade as execute_upgrade_flow, pending_upgrade as pending_upgrade_flow,
-    propose_upgrade as propose_upgrade_flow,
+    ExecuteTimePolicy, UpgradeErrors, UpgradeKeys, UpgradeTopics,
+    cancel_upgrade as cancel_upgrade_flow, execute_upgrade as execute_upgrade_flow,
+    pending_upgrade as pending_upgrade_flow, propose_upgrade as propose_upgrade_flow,
 };
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
@@ -171,9 +171,7 @@ impl StakingContract {
         env.storage().instance().set(&TOKEN_KEY, &token);
         env.storage().instance().set(&LOCK_PERIOD_KEY, &0u64);
         env.storage().instance().set(&MIN_STAKE_KEY, &1i128);
-        env.storage()
-            .instance()
-            .set(&MAX_STAKE_KEY, &i128::MAX);
+        env.storage().instance().set(&MAX_STAKE_KEY, &i128::MAX);
         env.storage().instance().set(&REWARDS_ENABLED_KEY, &true);
         env.storage().instance().set(&REWARD_PER_SHARE_KEY, &0i128);
         env.storage().instance().set(&REWARD_POOL_KEY, &0i128);
@@ -238,7 +236,11 @@ impl StakingContract {
             token_address: Self::token(env.clone()),
             min_stake: Self::min_stake(env.clone()),
             lock_period_seconds: Self::lock_period_seconds(env.clone()),
-            max_stake_per_address: env.storage().instance().get(&MAX_STAKE_KEY).unwrap_or(i128::MAX),
+            max_stake_per_address: env
+                .storage()
+                .instance()
+                .get(&MAX_STAKE_KEY)
+                .unwrap_or(i128::MAX),
             rewards_enabled: env
                 .storage()
                 .instance()
@@ -256,8 +258,12 @@ impl StakingContract {
         if config.max_stake_per_address < config.min_stake {
             return Err(StakingError::InvalidAmount);
         }
-        env.storage().instance().set(&TOKEN_KEY, &config.token_address);
-        env.storage().instance().set(&MIN_STAKE_KEY, &config.min_stake);
+        env.storage()
+            .instance()
+            .set(&TOKEN_KEY, &config.token_address);
+        env.storage()
+            .instance()
+            .set(&MIN_STAKE_KEY, &config.min_stake);
         env.storage()
             .instance()
             .set(&LOCK_PERIOD_KEY, &config.lock_period_seconds);
@@ -267,7 +273,8 @@ impl StakingContract {
         env.storage()
             .instance()
             .set(&REWARDS_ENABLED_KEY, &config.rewards_enabled);
-        env.events().publish((TOPIC_CONFIG_UPDATED,), (EVENT_VERSION, config));
+        env.events()
+            .publish((TOPIC_CONFIG_UPDATED,), (EVENT_VERSION, config));
         Ok(())
     }
 
@@ -418,7 +425,12 @@ impl StakingContract {
     }
 
     /// Release previously locked host stake for an arena.
-    pub fn release_host_stake(env: Env, caller: Address, host: Address, arena_id: u64) -> Result<(), StakingError> {
+    pub fn release_host_stake(
+        env: Env,
+        caller: Address,
+        host: Address,
+        arena_id: u64,
+    ) -> Result<(), StakingError> {
         caller.require_auth();
         let admin = Self::admin(env.clone());
         let factory = Self::factory(env.clone());
@@ -483,7 +495,11 @@ impl StakingContract {
 
         let total_staked: i128 = env.storage().instance().get(&TOTAL_STAKED_KEY).unwrap_or(0);
         let total_shares: i128 = env.storage().instance().get(&TOTAL_SHARES_KEY).unwrap_or(0);
-        let max_stake: i128 = env.storage().instance().get(&MAX_STAKE_KEY).unwrap_or(i128::MAX);
+        let max_stake: i128 = env
+            .storage()
+            .instance()
+            .get(&MAX_STAKE_KEY)
+            .unwrap_or(i128::MAX);
         let new_balance = position
             .amount
             .checked_add(amount)
