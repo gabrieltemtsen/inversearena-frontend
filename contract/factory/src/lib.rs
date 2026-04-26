@@ -43,6 +43,13 @@ const MAX_PLAYERS_CAP_KEY: Symbol = symbol_short!("MAX_PLR");
 const STAKING_CONTRACT_KEY: Symbol = symbol_short!("STAKING");
 const MIN_HOST_STAKE_KEY: Symbol = symbol_short!("HST_MIN");
 
+// ── Player participation rate limit ───────────────────────────────────────────────
+const PARTICIPATION_LIMIT_KEY: Symbol = symbol_short!("P_LIM");
+const PLAYER_PARTICIPATION_KEY: Symbol = symbol_short!("P_PAR");
+const TOTAL_ARENAS_CREATED_KEY: Symbol = symbol_short!("T_ARNA");
+
+pub const DEFAULT_MAX_CONCURRENT_ARENAS: u32 = 3;
+
 // ── Fee timelock storage keys ─────────────────────────────────────────────────
 const WIN_FEE_BPS_KEY: Symbol = symbol_short!("FEE_BPS");
 const PENDING_FEE_KEY: Symbol = symbol_short!("P_FEE");
@@ -157,6 +164,18 @@ pub enum DataKey {
     Pool(u32),
     ArenaRef(u64),
     ArenaWhitelist(u64, Address),
+    PlayerStats(Address),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerStats {
+    pub arenas_entered: u32,
+    pub arenas_won: u32,
+    pub total_rounds_survived: u32,
+    pub total_entry_fees_paid: i128,
+    pub total_winnings: i128,
+    pub win_rate_bps: u32,
 }
 
 // ── Timelock constant: 48 hours in seconds ────────────────────────────────────
@@ -295,6 +314,8 @@ pub enum Error {
     ArithmeticOverflow = 33,
     /// `round_speed` is below `MIN_ROUND_SPEED_LEDGERS` or above `MAX_ROUND_SPEED_LEDGERS`.
     InvalidRoundSpeed = 34,
+    /// Player has reached the max concurrent arena participation limit.
+    ParticipationLimitReached = 35,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -566,6 +587,127 @@ impl FactoryContract {
         }
         env.storage().instance().set(&MAX_PLAYERS_CAP_KEY, &new_cap);
         Ok(())
+    }
+
+    // ── Player participation rate limit (sybil attack mitigation) ───────────────
+
+    /// Return the max concurrent arenas a player can participate in.
+    /// Defaults to [`DEFAULT_MAX_CONCURRENT_ARENAS`] (3).
+    pub fn get_max_concurrent_arenas(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&PARTICIPATION_LIMIT_KEY)
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_ARENAS)
+    }
+
+    /// Update the max concurrent arenas limit. Admin-only.
+    pub fn set_max_concurrent_arenas(env: Env, new_limit: u32) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        admin.require_auth();
+        env.storage().instance().set(&PARTICIPATION_LIMIT_KEY, &new_limit);
+        Ok(())
+    }
+
+    /// Get player participation count for active arenas.
+    pub fn get_participation_count(env: Env, player: Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::PlayerStats(player.clone()))
+            .map(|stats: PlayerStats| stats.arenas_entered)
+            .unwrap_or(0)
+    }
+
+    /// Increment participation count for a player when joining an arena.
+    /// Called by arena contract before accepting join.
+    pub fn increment_participation(env: Env, player: Address) -> Result<(), Error> {
+        let limit = Self::get_max_concurrent_arenas(env.clone());
+        let current = Self::get_player_stats(env.clone(), player.clone())
+            .arenas_entered;
+        if current >= limit {
+            return Err(Error::ParticipationLimitReached);
+        }
+        Ok(())
+    }
+
+    /// Record arena entry for a player.
+    pub fn record_arena_entry(env: Env, player: Address, entry_fee: i128) {
+        let key = DataKey::PlayerStats(player.clone());
+        let mut stats: PlayerStats = env.storage().persistent().get(&key).unwrap_or(PlayerStats {
+            arenas_entered: 0,
+            arenas_won: 0,
+            total_rounds_survived: 0,
+            total_entry_fees_paid: 0,
+            total_winnings: 0,
+            win_rate_bps: 0,
+        });
+        stats.arenas_entered = stats.arenas_entered.saturating_add(1);
+        stats.total_entry_fees_paid = stats.total_entry_fees_paid.saturating_add(entry_fee);
+        if stats.arenas_entered > 0 {
+            stats.win_rate_bps = (stats.arenas_won * 10_000) / stats.arenas_entered;
+        }
+        env.storage().persistent().set(&key, &stats);
+        env.storage().persistent().extend_ttl(
+            &key,
+            REGISTRY_TTL_THRESHOLD,
+            REGISTRY_TTL_EXTEND_TO,
+        );
+    }
+
+    /// Record arena win for a player.
+    pub fn record_arena_win(env: Env, player: Address, winnings: i128, rounds_survived: u32) {
+        let key = DataKey::PlayerStats(player.clone());
+        let mut stats: PlayerStats = env.storage().persistent().get(&key).unwrap_or(PlayerStats {
+            arenas_entered: 0,
+            arenas_won: 0,
+            total_rounds_survived: 0,
+            total_entry_fees_paid: 0,
+            total_winnings: 0,
+            win_rate_bps: 0,
+        });
+        stats.arenas_won = stats.arenas_won.saturating_add(1);
+        stats.total_rounds_survived = stats.total_rounds_survived.saturating_add(rounds_survived);
+        stats.total_winnings = stats.total_winnings.saturating_add(winnings);
+        if stats.arenas_entered > 0 {
+            stats.win_rate_bps = (stats.arenas_won * 10_000) / stats.arenas_entered;
+        }
+        env.storage().persistent().set(&key, &stats);
+        env.storage().persistent().extend_ttl(
+            &key,
+            REGISTRY_TTL_THRESHOLD,
+            REGISTRY_TTL_EXTEND_TO,
+        );
+    }
+
+    /// Decrement participation count when player is eliminated or arena completes.
+    pub fn decrement_participation(env: Env, player: Address) {
+        let key = DataKey::PlayerStats(player.clone());
+        if let Some(mut stats) = env.storage().persistent().get::<_, PlayerStats>(&key) {
+            if stats.arenas_entered > 0 {
+                stats.arenas_entered = stats.arenas_entered.saturating_sub(1);
+            }
+            env.storage().persistent().set(&key, &stats);
+        }
+    }
+
+    /// Get player stats. Returns zero-value struct for player with no history.
+    pub fn get_player_stats(env: Env, player: Address) -> PlayerStats {
+        let key = DataKey::PlayerStats(player);
+        env.storage().persistent().get(&key).unwrap_or(PlayerStats {
+            arenas_entered: 0,
+            arenas_won: 0,
+            total_rounds_survived: 0,
+            total_entry_fees_paid: 0,
+            total_winnings: 0,
+            win_rate_bps: 0,
+        })
+    }
+
+    /// Get total arenas created (platform stats).
+    pub fn total_arenas_created(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&TOTAL_ARENAS_CREATED_KEY)
+            .unwrap_or(0u32)
     }
 
     // ── Fee timelock ──────────────────────────────────────────────────────────
@@ -1028,6 +1170,16 @@ impl FactoryContract {
             .instance()
             .set(&POOL_COUNT_KEY, &(pool_id + 1));
 
+        // Increment total arenas created.
+        let total: u32 = env
+            .storage()
+            .instance()
+            .get(&TOTAL_ARENAS_CREATED_KEY)
+            .unwrap_or(0u32);
+        env.storage()
+            .instance()
+            .set(&TOTAL_ARENAS_CREATED_KEY, &(total + 1));
+
         env.events().publish(
             (TOPIC_POOL_CREATED,),
             (
@@ -1244,7 +1396,13 @@ impl FactoryContract {
         result
     }
 
-    pub fn update_arena_status(env: Env, arena_id: u64, status: ArenaStatus) -> Result<(), Error> {
+    pub fn update_arena_status(
+        env: Env,
+        arena_id: u64,
+        status: ArenaStatus,
+        winner: Option<Address>,
+        players: Vec<Address>,
+    ) -> Result<(), Error> {
         let ref_key = DataKey::ArenaRef(arena_id);
         let mut arena_ref: ArenaRef = env
             .storage()
@@ -1263,8 +1421,40 @@ impl FactoryContract {
             REGISTRY_TTL_EXTEND_TO,
         );
 
-        // Release host stake when arena reaches terminal status.
+        // Update player stats on arena completion.
         if status == ArenaStatus::Completed || status == ArenaStatus::Cancelled {
+            // Get arena metadata for entry fee.
+            let arena_meta: Option<ArenaMetadata> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Pool(arena_id as u32));
+            let entry_fee = arena_meta.map(|m| m.stake_amount).unwrap_or(0i128);
+
+            for player in players.iter() {
+                // Record arena entry for all participants.
+                Self::record_arena_entry(env.clone(), player.clone(), entry_fee);
+            }
+
+            // Record win for winner.
+            if let Some(winner_addr) = winner {
+let _pool_count: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&POOL_COUNT_KEY)
+                    .unwrap_or(0u32);
+                let arena_key = DataKey::Pool(arena_id as u32);
+                if let Some(meta) = env.storage().persistent().get::<_, ArenaMetadata>(&arena_key) {
+                    let total_prize = meta.stake_amount * (meta.capacity as i128);
+                    Self::record_arena_win(
+                        env.clone(),
+                        winner_addr.clone(),
+                        total_prize,
+                        1u32,
+                    );
+                }
+            }
+
+            // Release host stake when arena reaches terminal status.
             if let Ok(staking_contract) = Self::get_staking_contract(env.clone()) {
                 env.invoke_contract::<()>(
                     &staking_contract,
